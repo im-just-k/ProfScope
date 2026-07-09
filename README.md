@@ -1,1 +1,1 @@
-# QueryCan - U15 Faculty Search Engine
+# ProfScope - U15 Faculty Search Engine
