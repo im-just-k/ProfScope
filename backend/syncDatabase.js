@@ -1,25 +1,76 @@
 require('dotenv').config();
-const { ingestUniversity } = require('./ingestionEngine');
+const { createClient } = require('@supabase/supabase-js');
+const { ingestUniversity, UNIVERSITY_CONFIGS } = require('./ingestionEngine');
 
-async function generateSQL() {
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY
+);
+
+/**
+ * Syncs a single university into Supabase
+ */
+async function syncUniversityFaculty(universityName, registryKey) {
     try {
-        const scrapedFaculty = await ingestUniversity('uwaterloo');
-        if (scrapedFaculty.length === 0) return;
-
-        console.log('\n--- COPY THE SQL BELOW THIS LINE ---_');
-        console.log(`INSERT INTO faculty (university_id, first_name, last_name, email, department) VALUES`);
+        console.log(`\n--- Starting Sync for ${universityName} ---`);
         
-        const valueRows = scrapedFaculty.map((prof, index) => {
-            const isLast = index === scrapedFaculty.length - 1;
-            const escapedLastName = prof.last_name.replace(/'/g, "''");
-            const escapedFirstName = prof.first_name.replace(/'/g, "''");
-            return `    ((SELECT id FROM universities WHERE name = 'University of Waterloo'), '${escapedFirstName}', '${escapedLastName}', '${prof.email}', '${prof.department}')${isLast ? ';' : ','}`;
-        });
+        // Resolves matching database entity UUID
+        const { data: uni, error: uniError } = await supabase
+            .from('universities')
+            .select('id')
+            .eq('name', universityName)
+            .single();
 
-        console.log(valueRows.join('\n'));
-        console.log('--- END OF SQL ---');
-    } catch (e) {
-        console.error(e);
+        if (uniError || !uni) {
+            console.error(`[Sync Error] "${universityName}" not found in DB seed data. Skipping.`);
+            return;
+        }
+
+        // Fetches records from scraping architecture
+        const scrapedFaculty = await ingestUniversity(registryKey);
+        if (scrapedFaculty.length === 0) {
+            console.log(`[Sync Warning] No data extracted for ${universityName}.`);
+            return;
+        }
+
+        // Maps values to data columns
+        const facultyToInsert = scrapedFaculty.map(prof => ({
+            first_name: prof.first_name,
+            last_name: prof.last_name,
+            email: prof.email,
+            university_id: uni.id,
+            department: prof.department
+        }));
+
+        // 4. Batch upsert payload to Supabase (ignores conflict errors automatically)
+        const { error: insertError } = await supabase
+            .from('faculty')
+            .upsert(facultyToInsert, { onConflict: 'email' });
+
+        if (insertError) throw insertError;
+        console.log(`[Sync Success] Database synchronized safely for ${universityName}!`);
+
+    } catch (error) {
+        console.error(`[Sync Failure] Processing error on ${universityName}:`, error.message);
     }
 }
-generateSQL();
+
+/**
+ * Global Sequence Orchestrator
+ * Sweeps through all configured platforms dynamically
+ */
+async function syncAllUniversities() {
+    console.log("=== BEGINNING GLOBAL PROF SCOPE INGESTION ===");
+    
+    const keys = Object.keys(UNIVERSITY_CONFIGS);
+    
+    for (const key of keys) {
+        const targetUni = UNIVERSITY_CONFIGS[key];
+        await syncUniversityFaculty(targetUni.name, key);
+    }
+    
+    console.log("\n=== GLOBAL INGESTION COMPLETE ===");
+}
+
+// Fires execution sequence
+syncAllUniversities();
